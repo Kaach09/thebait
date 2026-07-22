@@ -411,3 +411,375 @@ body { margin: 0; background: var(--bg); }
   const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indocm1ya2h1eWJneW9za2pkaGRiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ3Mzg1MjUsImV4cCI6MjEwMDMxNDUyNX0.EnQ4PpBClSOlyo8IeILmIYz7PPhNZJiM3oB-L6A4Vlg';
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   // ==========================================================================
+
+  const STATE_KEY = 'fab-predictor-state-v3';
+  const ADMIN_CODE = 'Flesh&Bloom';
+  const CATEGORIES = ['Classic Constructed', 'Blitz', 'Silver Age', 'Living Legend', 'Autre'];
+  const INITIAL_CAPITAL = 1000;
+  const MONTHLY_BONUS = 100;
+  const MULTI_BONUS_PER_ANSWER = 0.1;
+  const TOURNAMENT_TYPES = ['Calling', 'Pro Tour', 'National Championship', 'Showdown', 'Autre'];
+  const DEFAULT_PLACEMENT_OPTIONS = ['Vainqueur', 'Top 4', 'Top 8', 'Top 16', 'Top 32', 'Éliminés en poules (J1)'];
+
+  function defaultTemplates(){
+    return [
+      { id: 'winner', text: 'Qui gagne {tournoi} ?', type: 'single', multiplier: 3, optionsSource: 'heroes', options: [], enabled: true },
+      { id: 'day2', text: 'Qui fait Day 2 à {tournoi} ?', type: 'multiple', multiplier: 1, optionsSource: 'heroes', options: [], enabled: true },
+      { id: 'mostplayed', text: 'Quel sera le héros le plus représenté à {tournoi} ?', type: 'single', multiplier: 1, optionsSource: 'heroes', options: [], enabled: true },
+      { id: 'french', text: 'À quelle place finiront les Français à {tournoi} ?', type: 'single', multiplier: 1, optionsSource: 'placements', options: [], enabled: true }
+    ];
+  }
+
+  const HEROES = [
+    "Oscilio v1","Ziggy","Mario","Jarl","Aurora","Cindra","Fai","Rhinar","Gravy","Vynnset",
+    "Dash i/o","Puffin","Kassai","Ira","Marlynn","Fang","Hala","Katsu","Valda","Dorinthea",
+    "Huntsman","Boltyn","Slippy","Teklo","Lyath","Groscilio","Riptide","Betsy","Tuffnut","RKO",
+    "Pleiades","Levia","Maxx","Bravo","Uzuri","Olympia"
+  ];
+
+  const HERO_WR_CC_DEFAULT = {
+    "Oscilio v1": 52, "Ziggy": 41, "Mario": 54, "Jarl": 50, "Aurora": 45, "Cindra": 56,
+    "Fai": 51, "Rhinar": 48, "Gravy": 46, "Vynnset": 48, "Dash i/o": 56, "Puffin": 51,
+    "Kassai": 55, "Ira": 52, "Marlynn": 49, "Fang": 53, "Hala": 43, "Katsu": 49,
+    "Valda": 58, "Dorinthea": 55, "Huntsman": 55, "Boltyn": 48, "Slippy": 50, "Teklo": 42,
+    "Lyath": 41, "Groscilio": 33, "Riptide": 47, "Betsy": 50, "Tuffnut": 44, "RKO": 50,
+    "Pleiades": 42, "Levia": 34, "Maxx": 40, "Bravo": 45, "Uzuri": 43, "Olympia": 48
+  };
+  function heroWr(name){
+    return (state.heroWinRates && state.heroWinRates.hasOwnProperty(name)) ? state.heroWinRates[name] : null;
+  }
+
+  let state = { questions: [], picks: {}, balances: {}, displayNames: {}, history: {}, tournaments: [], matchupMatrix: {}, questionTemplates: defaultTemplates(), accounts: {}, tutorialSeen: {}, heroWinRates: Object.assign({}, HERO_WR_CC_DEFAULT) };
+  let currentUser = '';
+  let currentUserDisplay = '';
+  let gateMode = 'login';
+  let currentTab = 'pronostics';
+  let catFilterPron = 'Toutes';
+  let catFilterRes = 'Toutes';
+  let tournamentFilterPron = 'Toutes';
+  let tournamentFilterRes = 'Toutes';
+  let betStatusFilterPron = 'all';
+  let isAdmin = false;
+  let newOpts = [];
+  let editingTemplateIdx = null;
+
+  const root = document.getElementById('fabRoot');
+  const toastEl = document.getElementById('fabToast');
+
+  function showToast(msg){
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    setTimeout(()=> toastEl.classList.remove('show'), 2400);
+  }
+
+  function pitchChip(n){ return '<span class="pitch-chip pitch-'+n+'">'+n+'</span>'; }
+  function checkBadge(colorClass){ return '<span class="pitch-chip '+(colorClass||'pitch-2')+'">✓</span>'; }
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function escapeAttr(s){ return String(s).replace(/'/g, "\\'"); }
+  function uid(){ return 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
+  function normKey(s){ return String(s).trim().toLowerCase(); }
+
+  function randomSalt(){
+    const arr = new Uint8Array(16);
+    crypto.getRandomValues(arr);
+    return Array.from(arr).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+  async function hashPassword(password, salt){
+    const enc = new TextEncoder().encode(salt + ':' + password);
+    const buf = await crypto.subtle.digest('SHA-256', enc);
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+  function displayNameFor(key){ return (state.displayNames && state.displayNames[key]) || key; }
+  function monthKey(){ const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0'); }
+  function monthsBetween(mkFrom, mkTo){
+    const a = mkFrom.split('-').map(Number), b = mkTo.split('-').map(Number);
+    return (b[0]-a[0])*12 + (b[1]-a[1]);
+  }
+  function formatDate(ts){
+    return new Date(ts).toLocaleString('fr-FR', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  }
+  function toDatetimeLocalValue(ts){
+    const d = new Date(ts);
+    const pad = n => String(n).padStart(2,'0');
+    return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
+  }
+
+  // ==========================================================================
+  // PERSISTANCE — Supabase remplace window.storage (compte "kv_store", clé unique)
+  // ==========================================================================
+  async function loadState(){
+    try {
+      const { data, error } = await sb.from('kv_store').select('value').eq('key', STATE_KEY).maybeSingle();
+      if (error) throw error;
+      if (data && data.value) {
+        state = JSON.parse(data.value);
+        if (!state.questions) state.questions = [];
+        if (!state.picks) state.picks = {};
+        if (!state.balances) state.balances = {};
+        if (!state.displayNames) state.displayNames = {};
+        if (!state.history) state.history = {};
+        if (!state.tournaments) state.tournaments = [];
+        if (!state.matchupMatrix) state.matchupMatrix = {};
+        if (!state.questionTemplates) state.questionTemplates = defaultTemplates();
+        if (!state.accounts) state.accounts = {};
+        if (!state.tutorialSeen) state.tutorialSeen = {};
+        if (!state.heroWinRates) state.heroWinRates = Object.assign({}, HERO_WR_CC_DEFAULT);
+      }
+    } catch(e) {
+      console.error('Erreur de chargement Supabase :', e);
+      showToast("Impossible de charger les données — vérifie la config Supabase.");
+    }
+  }
+
+  function mergeState(remote, local){
+    const merged = JSON.parse(JSON.stringify(remote));
+    ['accounts','displayNames','balances','history','tutorialSeen'].forEach(field => {
+      merged[field] = Object.assign({}, remote[field]||{}, local[field]||{});
+    });
+    merged.picks = Object.assign({}, remote.picks||{});
+    Object.keys(local.picks||{}).forEach(qId => {
+      merged.picks[qId] = Object.assign({}, merged.picks[qId]||{}, local.picks[qId]||{});
+    });
+    merged.matchupMatrix = Object.assign({}, remote.matchupMatrix||{});
+    Object.keys(local.matchupMatrix||{}).forEach(a => {
+      merged.matchupMatrix[a] = Object.assign({}, merged.matchupMatrix[a]||{}, local.matchupMatrix[a]||{});
+    });
+    merged.heroWinRates = Object.assign({}, remote.heroWinRates||{}, local.heroWinRates||{});
+    ['questions','tournaments'].forEach(field => {
+      const byId = {};
+      (remote[field]||[]).forEach(item => { byId[item.id] = item; });
+      (local[field]||[]).forEach(item => { byId[item.id] = item; });
+      merged[field] = Object.values(byId);
+    });
+    merged.questionTemplates = local.questionTemplates || remote.questionTemplates;
+    return merged;
+  }
+
+  async function saveState(){
+    try {
+      const { data, error: fetchErr } = await sb.from('kv_store').select('value').eq('key', STATE_KEY).maybeSingle();
+      if (fetchErr) throw fetchErr;
+      if (data && data.value) {
+        const remote = JSON.parse(data.value);
+        state = mergeState(remote, state);
+      }
+      const { error } = await sb.from('kv_store').upsert({ key: STATE_KEY, value: JSON.stringify(state) }, { onConflict: 'key' });
+      if (error) throw error;
+    }
+    catch(e) { console.error(e); showToast("Erreur de sauvegarde, réessaie."); }
+  }
+  
+  window.fabApp = {
+    init: async () => { await loadState(); render(); },
+    login: async () => {
+      const id = normKey(document.getElementById('loginId').value);
+      const pw = document.getElementById('loginPw').value;
+      if(!id || !pw) { showToast('Remplis les champs.'); return; }
+      if(!state.accounts[id]) { showToast('Compte inexistant.'); return; }
+      const { salt, hash } = state.accounts[id];
+      const attempt = await hashPassword(pw, salt);
+      if(attempt !== hash) { showToast('Mot de passe incorrect.'); return; }
+      currentUser = id;
+      currentUserDisplay = state.displayNames[id] || id;
+      render();
+    },
+    register: async () => {
+      const id = normKey(document.getElementById('regId').value);
+      const pw1 = document.getElementById('regPw').value;
+      const pw2 = document.getElementById('regPw2').value;
+      if(!id || !pw1 || !pw2) { showToast('Remplis tous les champs.'); return; }
+      if(pw1 !== pw2) { showToast('Les mots de passe ne correspondent pas.'); return; }
+      if(state.accounts[id]) { showToast('Ce compte existe déjà.'); return; }
+      const salt = randomSalt();
+      const hash = await hashPassword(pw1, salt);
+      state.accounts[id] = { salt, hash };
+      state.displayNames[id] = id;
+      ensureBalance(id);
+      await saveState();
+      currentUser = id;
+      currentUserDisplay = id;
+      gateMode = 'login';
+      render();
+    },
+    setGateMode: (mode) => { gateMode = mode; render(); },
+    changeUser: () => { currentUser = ''; gateMode = 'login'; render(); },
+    setTab: (tab) => { currentTab = tab; render(); },
+    toggleExpand: (qId) => { window.__fabExpanded = window.__fabExpanded || {}; window.__fabExpanded[qId] = !window.__fabExpanded[qId]; render(); },
+    toggleOption: (qId, optName, type) => {
+      window.__fabSelected = window.__fabSelected || {};
+      if(!window.__fabSelected[qId]) window.__fabSelected[qId] = [];
+      if(type === 'single') window.__fabSelected[qId] = window.__fabSelected[qId][0] === optName ? [] : [optName];
+      else {
+        const idx = window.__fabSelected[qId].indexOf(optName);
+        if(idx >= 0) window.__fabSelected[qId].splice(idx, 1);
+        else window.__fabSelected[qId].push(optName);
+      }
+      render();
+    },
+    updateStakeDraft: (qId, val) => {
+      window.__fabStakeDraft = window.__fabStakeDraft || {};
+      window.__fabStakeDraft[qId] = val;
+      const el = document.getElementById('stakeLabel-'+qId);
+      if(el) {
+        const available = state.balances[currentUser].amount;
+        el.textContent = val + ' / ' + available + ' pts';
+      }
+      const preview = document.getElementById('preview-'+qId);
+      if(preview) {
+        const q = state.questions.find(x => x.id === qId);
+        const selected = getSelected(qId);
+        const payout = computePotentialPayout(q, selected, parseFloat(val) || 0);
+        preview.textContent = 'Gain potentiel si juste : ' + payout + ' pts';
+      }
+    },
+    setMaxStake: (qId, max) => {
+      window.__fabStakeDraft = window.__fabStakeDraft || {};
+      window.__fabStakeDraft[qId] = max;
+      const inp = document.getElementById('stake-'+qId);
+      if(inp) inp.value = max;
+      window.fabApp.updateStakeDraft(qId, max);
+    },
+    placeBet: async (qId) => {
+      const q = state.questions.find(x => x.id === qId);
+      if(!q) { showToast('Question non trouvée.'); return; }
+      const selected = getSelected(qId);
+      if(selected.length === 0) { showToast('Sélectionne au moins une option.'); return; }
+      const stakeVal = parseFloat((window.__fabStakeDraft && window.__fabStakeDraft[qId]) || 0);
+      if(!stakeVal || stakeVal <= 0) { showToast('Mise invalide.'); return; }
+      const available = state.balances[currentUser].amount;
+      if(stakeVal > available) { showToast('Capital insuffisant.'); return; }
+      if(!state.picks[qId]) state.picks[qId] = {};
+      state.picks[qId][currentUser] = { options: selected, stake: Math.round(stakeVal), placedAt: Date.now() };
+      state.balances[currentUser].amount -= Math.round(stakeVal);
+      window.__fabSelected = window.__fabSelected || {};
+      window.__fabStakeDraft = window.__fabStakeDraft || {};
+      delete window.__fabSelected[qId];
+      delete window.__fabStakeDraft[qId];
+      await saveState();
+      showToast('Pari placé !');
+      render();
+    },
+    closeOnboarding: () => {
+      if(!state.tutorialSeen) state.tutorialSeen = {};
+      state.tutorialSeen[currentUser] = true;
+      const el = document.getElementById('onboardingRoot');
+      if(el) el.innerHTML = '';
+    }
+  };
+  
+  function getSelected(qId){
+    if (window.__fabSelected && window.__fabSelected[qId] !== undefined) return window.__fabSelected[qId];
+    const p = state.picks[qId] && state.picks[qId][currentUser];
+    return p ? p.options.slice() : [];
+  }
+  
+  function getStakeDraft(qId){
+    if (window.__fabStakeDraft && window.__fabStakeDraft[qId] !== undefined) return window.__fabStakeDraft[qId];
+    const p = state.picks[qId] && state.picks[qId][currentUser];
+    return p ? String(p.stake) : '';
+  }
+
+  function computeOdds(options){
+    if (!options.every(o => typeof o.wr === 'number' && !isNaN(o.wr) && o.wr > 0)) return null;
+    const sum = options.reduce((a,o)=>a+o.wr, 0);
+    const map = {};
+    options.forEach(o => { map[o.name] = (o.wr / sum) * 100; });
+    return map;
+  }
+
+  function effectiveOdds(q, name){
+    const odds = computeOdds(q.options);
+    if (!odds || !odds[name]) return q.options.length;
+    return (100 / odds[name]) * (q.multiplier || 1);
+  }
+
+  function computePotentialPayout(q, selected, stake){
+    if (!q || !selected || selected.length === 0 || !stake) return 0;
+    const sub = stake / selected.length;
+    const sum = selected.reduce((s,name)=> s + effectiveOdds(q, name), 0);
+    let payout = sub * sum;
+    if (q.type === 'multiple' && selected.length > 1) payout += stake * MULTI_BONUS_PER_ANSWER * selected.length;
+    return Math.round(payout);
+  }
+
+  function ensureBalance(user){
+    if (!state.balances) state.balances = {};
+    if (!state.balances[user]) {
+      state.balances[user] = { amount: INITIAL_CAPITAL, month: monthKey() };
+      return true;
+    }
+    return false;
+  }
+
+  function render(){
+    if (!currentUser) {
+      root.innerHTML = '<div class="fab-gate">' +
+        '<div class="fab-sub">' + (gateMode === 'register' ? 'Crée ton compte' : 'Connecte-toi') + '</div>' +
+        '<input id="' + (gateMode === 'register' ? 'reg' : 'login') + 'Id" type="text" placeholder="Identifiant" />' +
+        '<input id="' + (gateMode === 'register' ? 'reg' : 'login') + 'Pw" type="password" placeholder="Mot de passe" />' +
+        (gateMode === 'register' ? '<input id="regPw2" type="password" placeholder="Confirmer" />' : '') +
+        '<button class="fab-btn fab-btn-primary" onclick="window.fabApp.' + (gateMode === 'register' ? 'register' : 'login') + '()">' + (gateMode === 'register' ? 'Créer' : 'Connexion') + '</button>' +
+        '<div class="fab-sub" style="margin-top:16px;font-size:11px">' + (gateMode === 'register' ? 'Déjà inscrit ?' : 'Pas de compte ?') + ' <a href="#" onclick="window.fabApp.setGateMode(\'' + (gateMode === 'register' ? 'login' : 'register') + '\');return false;" style="color:var(--yellow)">' + (gateMode === 'register' ? 'Connexion' : 'Inscription') + '</a></div>' +
+        '</div>';
+      return;
+    }
+    ensureBalance(currentUser);
+    let html = '<div class="fab-userbar"><span>Connecté : <b>'+escapeHtml(currentUserDisplay)+'</b> | Capital: <b class="balance">'+state.balances[currentUser].amount+'</b></span>' +
+      '<button onclick="window.fabApp.changeUser()">Déconnexion</button></div>' +
+      '<div class="fab-tabs">' +
+      '<button class="fab-tab' + (currentTab === 'pronostics' ? ' active' : '') + '" onclick="window.fabApp.setTab(\'pronostics\')">Pronostics</button>' +
+      '</div>' +
+      '<div class="fab-body">';
+    
+    const base = state.questions.filter(q => q.status === 'open');
+    if (base.length === 0) {
+      html += '<div class="fab-empty">Aucun pronostic disponible pour le moment.</div>';
+    } else {
+      html += base.map(q => {
+        const expanded = !!(window.__fabExpanded && window.__fabExpanded[q.id]);
+        const existingPick = state.picks[q.id] && state.picks[q.id][currentUser];
+        const selected = getSelected(q.id);
+        const available = state.balances[currentUser].amount + (existingPick ? existingPick.stake : 0);
+        
+        let card = '<div class="q-card">';
+        card += '<div class="q-card-header" onclick="window.fabApp.toggleExpand(\'' + q.id + '\')">';
+        card += '<div class="q-text">' + escapeHtml(q.text) + '</div>';
+        card += '</div>';
+        
+        if (expanded) {
+          card += '<div class="opt-grid">';
+          (q.options || []).forEach(o => {
+            const isSel = selected.includes(o.name);
+            const odds = effectiveOdds(q, o.name);
+            card += '<button class="opt-btn' + (isSel ? ' picked' : '') + '" onclick="window.fabApp.toggleOption(\'' + q.id + '\',\'' + escapeAttr(o.name) + '\',\'' + q.type + '\')">' +
+              escapeHtml(o.name) + (isSel ? checkBadge() : '') + '<span class="opt-odds">x' + odds.toFixed(2) + '</span></button>';
+          });
+          card += '</div>';
+          
+          if (!existingPick) {
+            card += '<div class="stake-gauge">';
+            card += '<input type="range" min="0" max="' + available + '" id="stakeRange-' + q.id + '" value="0" oninput="window.fabApp.updateStakeDraft(\'' + q.id + '\', this.value)" />';
+            card += '<input type="number" id="stake-' + q.id + '" value="0" oninput="window.fabApp.updateStakeDraft(\'' + q.id + '\', this.value)" />';
+            card += '<button class="fab-btn fab-btn-gold fab-btn-sm" onclick="window.fabApp.placeBet(\'' + q.id + '\')">Parier</button>';
+            card += '<div id="preview-' + q.id + '" class="bet-summary">Gain : 0 pts</div>';
+            card += '</div>';
+          } else {
+            card += '<div class="bet-summary">🔒 Pari : ' + existingPick.stake + ' pts</div>';
+          }
+        }
+        card += '</div>';
+        return card;
+      }).join('');
+    }
+    
+    html += '</div>';
+    root.innerHTML = html;
+  }
+
+  // Initialisation au chargement
+  window.fabApp.init();
+})();
+</script>
+
+</body>
+</html>
