@@ -531,8 +531,41 @@ body { margin: 0; background: var(--bg); }
     }
   }
 
+  // Fusionne l'état distant (ce que d'autres joueurs ont pu sauvegarder entre-temps) avec
+  // notre état local, au lieu d'écraser bêtement — évite que deux inscriptions/paris presque
+  // simultanés s'effacent l'un l'autre.
+  function mergeState(remote, local){
+    const merged = JSON.parse(JSON.stringify(remote));
+    ['accounts','displayNames','balances','history','tutorialSeen'].forEach(field => {
+      merged[field] = Object.assign({}, remote[field]||{}, local[field]||{});
+    });
+    merged.picks = Object.assign({}, remote.picks||{});
+    Object.keys(local.picks||{}).forEach(qId => {
+      merged.picks[qId] = Object.assign({}, merged.picks[qId]||{}, local.picks[qId]||{});
+    });
+    merged.matchupMatrix = Object.assign({}, remote.matchupMatrix||{});
+    Object.keys(local.matchupMatrix||{}).forEach(a => {
+      merged.matchupMatrix[a] = Object.assign({}, merged.matchupMatrix[a]||{}, local.matchupMatrix[a]||{});
+    });
+    merged.heroWinRates = Object.assign({}, remote.heroWinRates||{}, local.heroWinRates||{});
+    ['questions','tournaments'].forEach(field => {
+      const byId = {};
+      (remote[field]||[]).forEach(item => { byId[item.id] = item; });
+      (local[field]||[]).forEach(item => { byId[item.id] = item; });
+      merged[field] = Object.values(byId);
+    });
+    merged.questionTemplates = local.questionTemplates || remote.questionTemplates;
+    return merged;
+  }
+
   async function saveState(){
     try {
+      const { data, error: fetchErr } = await sb.from('kv_store').select('value').eq('key', STATE_KEY).maybeSingle();
+      if (fetchErr) throw fetchErr;
+      if (data && data.value) {
+        const remote = JSON.parse(data.value);
+        state = mergeState(remote, state);
+      }
       const { error } = await sb.from('kv_store').upsert({ key: STATE_KEY, value: JSON.stringify(state) }, { onConflict: 'key' });
       if (error) throw error;
     }
